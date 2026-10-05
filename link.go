@@ -1,6 +1,8 @@
 package msmfw
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -35,6 +37,12 @@ func (l *linker) ln(src, dst string) {
 		dst = filepath.Join(dst, filepath.Base(src))
 	}
 	if err := os.Symlink(src, dst); err != nil {
+		// Outside Compat, a link that is already what we would make is no error.
+		if !l.cfg.Compat && errors.Is(err, fs.ErrExist) {
+			if cur, e := os.Readlink(dst); e == nil && cur == src {
+				return
+			}
+		}
 		l.cfg.Logf("ln: %v", err)
 		return
 	}
@@ -54,6 +62,23 @@ func (l *linker) names(dir string) []string {
 	}
 	l.dirs[dir] = out
 	return out
+}
+
+// present is whether the partition mounted at dir is there. The script only
+// checks for the directory, which a failed mount leaves behind.
+func (l *linker) present(dir string) bool {
+	if !isDir(dir) {
+		return false
+	}
+	if l.cfg.Compat {
+		return true
+	}
+	for _, m := range l.res.Mounts {
+		if m.Dir == dir {
+			return m.Err == nil
+		}
+	}
+	return false
 }
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
@@ -88,9 +113,16 @@ func (l *linker) run() error {
 	// partitions'. A dangling link is skipped (the script stops at it).
 	if p := l.cfg.ExtraPath; p != "" && isDir(p) {
 		for _, n := range l.names(p) {
-			if !strings.HasPrefix(n, ".") && exists(filepath.Join(p, n)) {
-				l.ln(filepath.Join(p, n), t(n))
+			if strings.HasPrefix(n, ".") {
+				continue
 			}
+			if !exists(filepath.Join(p, n)) {
+				if l.cfg.Compat {
+					break // the script's loop ends here, dropping the rest
+				}
+				continue
+			}
+			l.ln(filepath.Join(p, n), t(n))
 		}
 	}
 
@@ -151,18 +183,30 @@ func (l *linker) run() error {
 
 	// ath10k wcn3990 devices keep Bluetooth firmware on a partition of its
 	// own; the kernel wants it under qca/.
-	if bt := filepath.Join(l.mnt, "bluetooth"+l.cfg.SlotSuffix); isDir(bt) {
-		os.MkdirAll(t("qca"), 0o755)
+	if bt := filepath.Join(l.mnt, "bluetooth"+l.cfg.SlotSuffix); l.present(bt) {
+		var blobs []string
 		for _, n := range l.names(filepath.Join(bt, "image")) {
 			if !strings.HasPrefix(n, ".") {
-				l.ln(filepath.Join(bt, "image", n), t("qca"))
+				blobs = append(blobs, filepath.Join(bt, "image", n))
 			}
+		}
+		// The script's glob is unguarded: with nothing in image/ the pattern
+		// itself is linked, as a link named "*". (The venus loop is the only
+		// other bare glob, and it only runs when venus.mdt is there to match.)
+		if len(blobs) == 0 && l.cfg.Compat {
+			blobs = []string{filepath.Join(bt, "image", "*")}
+		}
+		if len(blobs) > 0 {
+			os.MkdirAll(t("qca"), 0o755)
+		}
+		for _, b := range blobs {
+			l.ln(b, t("qca"))
 		}
 	}
 
 	// The modem fetches its RF configuration over tqftpserv from fsg/ next to
 	// the remoteproc firmware (the downstream patch to the script).
-	if fsg := filepath.Join(l.mnt, "fsg"+l.cfg.SlotSuffix); isDir(fsg) && !exists(t("fsg")) {
+	if fsg := filepath.Join(l.mnt, "fsg"+l.cfg.SlotSuffix); l.present(fsg) && !exists(t("fsg")) {
 		l.ln(fsg, t("fsg"))
 	}
 
@@ -174,8 +218,22 @@ func (l *linker) run() error {
 	// A devicetree names its firmware with a per-device prefix, so
 	// similarly named blobs for different devices are told apart. Assume
 	// all of a device's blobs share it and link the tree there.
-	if prefix := firmwarePrefix(l.cfg.Sys); prefix != "" {
+	//
+	// The script takes the first firmware-name find(1) turns up. Outside
+	// Compat every distinct prefix in the devicetree gets the link, since
+	// devices do have several (and which one is first is luck).
+	for _, prefix := range firmwarePrefixes(l.cfg.Sys, l.cfg.Compat) {
 		os.MkdirAll(t(filepath.Dir(prefix)), 0o755)
+		if !l.cfg.Compat {
+			if cur, err := os.Readlink(t(prefix)); err == nil && cur == l.target {
+				continue
+			}
+			if _, err := os.Lstat(t(prefix)); err == nil {
+				// ln would put the link inside the directory that is there.
+				l.cfg.Logf("firmware prefix %s: %s exists, not linked", prefix, t(prefix))
+				continue
+			}
+		}
 		l.ln(l.target, t(prefix))
 	}
 	return nil
@@ -216,7 +274,12 @@ func (l *linker) mdtToMbn(dir string) {
 	for _, e := range ents {
 		p := filepath.Join(dir, e.Name())
 		if strings.HasSuffix(e.Name(), ".mdt") {
-			l.ln(p, strings.TrimSuffix(p, ".mdt")+".mbn")
+			mbn := strings.TrimSuffix(p, ".mdt") + ".mbn"
+			// The script tries every one and logs "File exists" for those
+			// that have an .mbn already.
+			if _, err := os.Lstat(mbn); err != nil || l.cfg.Compat {
+				l.ln(p, mbn)
+			}
 		}
 		if e.IsDir() {
 			sub = append(sub, p)
@@ -227,23 +290,52 @@ func (l *linker) mdtToMbn(dir string) {
 	}
 }
 
-// firmwarePrefix is the directory part of the first firmware-name property
-// in the devicetree, "" if there is none.
-func firmwarePrefix(sysRoot string) string {
-	name := findFirst(filepath.Join(sysRoot, "firmware/devicetree"), "firmware-name")
-	if name == "" {
-		return ""
+// firmwarePrefixes is the directory parts of the devicetree's firmware-name
+// properties. Compat: that of the first property find(1) finds, and only its
+// first word, as xargs hands it on. Otherwise: of every string of every
+// property, each once, sorted.
+func firmwarePrefixes(sysRoot string, compat bool) []string {
+	root := filepath.Join(sysRoot, "firmware/devicetree")
+	if compat {
+		name := findFirst(root, "firmware-name")
+		if name == "" {
+			return nil
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			return nil
+		}
+		// A property is a NUL-terminated string; xargs takes the first word.
+		f := strings.Fields(strings.ReplaceAll(string(b), "\x00", " "))
+		if len(f) == 0 {
+			return nil
+		}
+		return []string{filepath.Dir(f[0])}
 	}
-	b, err := os.ReadFile(name)
-	if err != nil {
-		return ""
+	seen := map[string]bool{}
+	filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || d.Name() != "firmware-name" {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil
+		}
+		for _, s := range strings.Split(string(b), "\x00") {
+			// A bare file name has no prefix to speak of.
+			if dir := filepath.Dir(strings.TrimSpace(s)); strings.TrimSpace(s) != "" &&
+				dir != "." && dir != "/" && !strings.Contains(dir, "..") {
+				seen[strings.TrimPrefix(dir, "/")] = true
+			}
+		}
+		return nil
+	})
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
 	}
-	// A property is a NUL-terminated string; xargs takes the first word.
-	f := strings.Fields(strings.ReplaceAll(string(b), "\x00", " "))
-	if len(f) == 0 {
-		return ""
-	}
-	return filepath.Dir(f[0])
+	sort.Strings(out)
+	return out
 }
 
 // findFirst is the first file called name below dir, in directory order as

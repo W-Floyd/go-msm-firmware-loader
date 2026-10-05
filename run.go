@@ -1,6 +1,7 @@
 package msmfw
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -89,28 +90,28 @@ func Run(cfg Config) (*Result, error) {
 	if super == nil {
 		super = DefaultSuperPartitions()
 	}
-	r := &runner{cfg: cfg, res: res, claimed: map[string]bool{}, isFW: matcher(fw, cfg.ExactMatch)}
+	exact := !(cfg.Compat || cfg.SubstringMatch) || cfg.ExactMatch
+	r := &runner{cfg: cfg, res: res, claimed: map[string]bool{}, isFW: matcher(fw, exact)}
 
 	if !cfg.DryRun {
-		if isMountPoint(cfg.Proc, cfg.Base) {
-			return nil, fmt.Errorf("%s: %w", cfg.Base, ErrLoaded)
-		}
-		// Unlike the script, make the directory: nothing else will have.
-		if err := os.MkdirAll(cfg.Base, 0o755); err != nil {
-			return nil, err
-		}
-		if err := cfg.System.MountTmpfs(cfg.Base); err != nil {
-			return nil, fmt.Errorf("tmpfs on %s: %w", cfg.Base, err)
-		}
-		for _, d := range []string{"mnt", "target"} {
-			if err := os.MkdirAll(filepath.Join(cfg.Base, d), 0o755); err != nil {
-				return res, err
+		if err := r.prepareBase(); err != nil {
+			if errors.Is(err, ErrLoaded) {
+				return nil, err // not ours to Close
 			}
+			return res, err
 		}
 	}
 
 	parts := scanPartitions(cfg.Sys)
-	r.mountDynamic(parts, matcher(super, cfg.ExactMatch))
+	if cfg.SlotSuffix == "" && !cfg.Compat && cfg.Partitions == nil {
+		for _, p := range parts {
+			if strings.HasSuffix(p.partName, "_a") || strings.HasSuffix(p.partName, "_b") {
+				cfg.Logf("warning: no slot suffix (androidboot.slot_suffix), but partition %q is A/B; the firmware partitions will not be found", p.partName)
+				break
+			}
+		}
+	}
+	r.mountDynamic(parts, matcher(super, exact))
 	for _, p := range parts {
 		if r.isFW(p.partName) && p.devName != "" && !r.claimed[p.partName] {
 			r.mount(p.partName, "direct", "/dev/"+p.devName, func() (string, func(), error) {
@@ -133,6 +134,40 @@ func Run(cfg Config) (*Result, error) {
 		res.PathSet = true
 	}
 	return res, nil
+}
+
+// prepareBase makes Base a tmpfs with mnt/ and target/ in it.
+//
+// The script runs `mount -t tmpfs` on a directory nothing has made, which
+// fails ("mount point does not exist") on every boot; its `mkdir -p` then
+// makes the directory on whatever file system /run is. So the tmpfs it
+// intends never exists. Compat does the same: a tmpfs only if Base is already
+// a directory. Otherwise the directory is made first, so the tmpfs is real,
+// and a second Run on it is refused.
+func (r *runner) prepareBase() error {
+	cfg := r.cfg
+	if !cfg.Compat && isMountPoint(cfg.Proc, cfg.Base) {
+		// The script stacks another tmpfs over the first, hiding its mounts.
+		return fmt.Errorf("%s: %w", cfg.Base, ErrLoaded)
+	}
+	if !cfg.Compat || isDir(cfg.Base) {
+		if err := os.MkdirAll(cfg.Base, 0o755); err != nil {
+			return err
+		}
+		if err := cfg.System.MountTmpfs(cfg.Base); err != nil {
+			return fmt.Errorf("tmpfs on %s: %w", cfg.Base, err)
+		}
+		r.res.tmpfs = true
+	} else {
+		cfg.Logf("mount: mounting none on %s failed: No such file or directory", cfg.Base)
+		r.res.plain = true
+	}
+	for _, d := range []string{"mnt", "target"} {
+		if err := os.MkdirAll(filepath.Join(cfg.Base, d), 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // mount makes the directory for name (which marks it taken, mounted or not,
@@ -186,21 +221,75 @@ func (r *runner) mountDynamic(parts []part, isSuper func(string) bool) {
 		}
 		sort.Slice(lps, func(i, j int) bool { return lps[i].Name < lps[j].Name })
 		for _, lp := range lps {
-			if r.isFW(lp.Name) {
-				r.mountLogical(dev, lp)
-			}
+			r.mountLogical(dev, lp)
 		}
 		return
 	}
 }
 
+// readSuper is the firmware partitions of the super device dev.
+//
+// make-dynpart-mappings maps only the first metadata slot, so Compat does
+// too. Otherwise the slot is the A/B slot's (a is 0, b is 1: the copy Android
+// itself maps), and a partition it does not list with extents is looked for
+// in the other slots, with a note.
 func (r *runner) readSuper(dev string) ([]liblp.Partition, error) {
 	f, err := os.Open(dev)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return liblp.Partitions(f, slotIndex(r.cfg.SlotSuffix))
+	pick := func(ps []liblp.Partition) (out []liblp.Partition) {
+		for _, p := range ps {
+			if r.isFW(p.Name) {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	if r.cfg.Compat {
+		ps, err := liblp.Partitions(f, 0)
+		return pick(ps), err
+	}
+	n, err := liblp.SlotCount(f)
+	if err != nil {
+		return nil, err
+	}
+	want := slotIndex(r.cfg.SlotSuffix)
+	order := []int{want}
+	for i := 0; i < n; i++ {
+		if i != want {
+			order = append(order, i)
+		}
+	}
+	have := map[string]bool{}
+	var out []liblp.Partition
+	var firstErr error
+	parsed := false
+	for _, slot := range order {
+		ps, err := liblp.Partitions(f, slot)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		parsed = true
+		for _, p := range pick(ps) {
+			if have[p.Name] || len(p.Extents) == 0 {
+				continue
+			}
+			have[p.Name] = true
+			if slot != want {
+				r.cfg.Logf("%s: not in metadata slot %d, using slot %d", p.Name, want, slot)
+			}
+			out = append(out, p)
+		}
+	}
+	if !parsed {
+		return nil, firstErr
+	}
+	return out, nil
 }
 
 // mountLogical mounts a partition of super: through a loop device over its

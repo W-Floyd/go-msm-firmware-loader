@@ -74,10 +74,21 @@ type Config struct {
 	Partitions      []string
 	SuperPartitions []string
 
-	// ExactMatch makes a partition name match only a whole entry of the
-	// lists. The script matches by substring, so a partition "sp" is
-	// mounted because "dsp_a" contains it; that is the default here, to
-	// load what the script does.
+	// Compat keeps the shell script's behaviour exactly, bugs included: the
+	// link tree, the mnt/ directories and the logged errors are what the
+	// script makes. Without it each of the script's bugs is fixed; the README
+	// lists them all. Compat cannot reproduce qbootctl failing (the slot
+	// always comes from SlotSuffix).
+	Compat bool
+
+	// SubstringMatch matches a partition name as a substring of the lists
+	// written out as one string, as the script does (so "sp" is mounted
+	// because "dsp_a" contains it). The default is whole entries; Compat
+	// implies substring matching.
+	SubstringMatch bool
+	// ExactMatch forces whole-entry matching, even in Compat.
+	//
+	// Deprecated: exact matching is the default outside Compat.
 	ExactMatch bool
 
 	// ExtraPath is a directory of blobs to link first, so that they win
@@ -186,6 +197,8 @@ type Result struct {
 
 	cfg    Config
 	closed bool
+	tmpfs  bool // Base is a tmpfs mount of ours
+	plain  bool // Base is a directory of ours on another file system (Compat)
 }
 
 // Close undoes what Run mounted: the partitions, their loop and mapper
@@ -212,8 +225,16 @@ func (r *Result) Close() error {
 			}
 		}
 	}
-	if err := r.cfg.System.Unmount(r.Base); err != nil {
-		errs = append(errs, fmt.Errorf("unmount %s: %w", r.Base, err))
+	switch {
+	case r.tmpfs:
+		if err := r.cfg.System.Unmount(r.Base); err != nil {
+			errs = append(errs, fmt.Errorf("unmount %s: %w", r.Base, err))
+		}
+	case r.plain && len(errs) == 0:
+		// Compat without a tmpfs: the links are in a plain directory.
+		if err := os.RemoveAll(r.Base); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }

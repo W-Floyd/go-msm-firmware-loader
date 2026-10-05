@@ -41,7 +41,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		cmdline   = fs.String("cmdline", "/proc/cmdline", "kernel command line file")
 		extra     = fs.String("extra-path", "", "directory of blobs to link first (default: the current firmware_class.path)")
 		noDM      = fs.Bool("no-dm", false, "loop devices only; never device-mapper")
-		exact     = fs.Bool("exact-match", false, "match partition names against the lists exactly, not as substrings (the script's way)")
+		compat    = fs.Bool("compat", false, "behave exactly as the shell script does, bugs included")
+		substr    = fs.Bool("substring-match", false, "match partition names as substrings of the lists (the script's way; --compat implies it)")
+		exact     = fs.Bool("exact-match", false, "deprecated: exact matching is the default; this forces it under --compat")
 		dryRun    = fs.Bool("dry-run", false, "print what would be mounted and change nothing")
 		teardown  = fs.Bool("teardown", false, "unmount everything under --base (a test aid) and exit")
 		quiet     = fs.Bool("q", false, "do not log progress")
@@ -70,6 +72,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 
 	cfg := Config{
 		Base: *base, NoSetPath: *noSetPath, NoDM: *noDM, ExactMatch: *exact, DryRun: *dryRun,
+		Compat: *compat, SubstringMatch: *substr,
 		Partitions: splitList(*parts), SuperPartitions: splitList(*supers),
 	}
 	if !*quiet {

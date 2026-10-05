@@ -42,3 +42,16 @@ func TestExportedSurface(t *testing.T) {
 		t.Errorf("exit %d", code)
 	}
 }
+
+func TestExportedCompat(t *testing.T) {
+	cfg := msmfw.Config{Compat: true, SubstringMatch: true, Sys: t.TempDir(), DryRun: true}
+	res, err := msmfw.Run(cfg)
+	if err != nil || !res.DryRun {
+		t.Fatal(res, err)
+	}
+	var out, errOut bytes.Buffer
+	args := []string{"-compat", "-dry-run", "-sys-not-a-flag"}
+	if code := msmfw.Main(args, &out, &errOut); code != msmfw.ExitUsage {
+		t.Errorf("exit %d", code)
+	}
+}

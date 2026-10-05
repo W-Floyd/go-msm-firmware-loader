@@ -15,11 +15,12 @@ import (
 type fakeSys struct {
 	fixtures  map[string]map[string]string
 	unmounted []string
+	tmpfs     []string
 	loops     []string
 	dm        bool
 }
 
-func (f *fakeSys) MountTmpfs(dir string) error { return nil }
+func (f *fakeSys) MountTmpfs(dir string) error { f.tmpfs = append(f.tmpfs, dir); return nil }
 func (f *fakeSys) Unmount(dir string) error    { f.unmounted = append(f.unmounted, dir); return nil }
 func (f *fakeSys) HasDM() bool                 { return f.dm }
 func (f *fakeSys) DMRemove(string) error       { return nil }
@@ -117,8 +118,11 @@ func link(t *testing.T, res *Result, rel, wantDest string) {
 	}
 }
 
+// TestRunLinks is the script's behaviour (Compat), "sp" and all.
 func TestRunLinks(t *testing.T) {
 	cfg, fake := world(t)
+	cfg.Compat = true
+	os.MkdirAll(cfg.Base, 0o755) // the script only gets a tmpfs on a directory that is there
 	res, err := Run(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -184,24 +188,34 @@ func TestRunLinks(t *testing.T) {
 	}
 }
 
-func TestRunExactMatch(t *testing.T) {
-	cfg, _ := world(t)
-	cfg.ExactMatch = true
-	cfg.DryRun = true
-	res, err := Run(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, m := range res.Mounts {
-		if m.Name == "sp" {
-			t.Error("sp matched exactly")
+func TestRunMatching(t *testing.T) {
+	for name, c := range map[string]struct {
+		mod  func(*Config)
+		want int
+	}{
+		"default":         {func(*Config) {}, 6},
+		"compat":          {func(c *Config) { c.Compat = true }, 7},
+		"substring":       {func(c *Config) { c.SubstringMatch = true }, 7},
+		"compat+exact":    {func(c *Config) { c.Compat, c.ExactMatch = true, true }, 6},
+		"substring+exact": {func(c *Config) { c.SubstringMatch, c.ExactMatch = true, true }, 6},
+	} {
+		cfg, _ := world(t)
+		cfg.DryRun = true
+		c.mod(&cfg)
+		res, err := Run(cfg)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if len(res.Mounts) != 6 {
-		t.Errorf("%d mounts: %+v", len(res.Mounts), res.Mounts)
-	}
-	if _, err := os.Stat(res.Base); err == nil {
-		t.Error("a dry run made the base")
+		sp := false
+		for _, m := range res.Mounts {
+			sp = sp || m.Name == "sp"
+		}
+		if len(res.Mounts) != c.want || sp != (c.want == 7) {
+			t.Errorf("%s: %d mounts, sp=%v: %+v", name, len(res.Mounts), sp, res.Mounts)
+		}
+		if _, err := os.Stat(res.Base); err == nil {
+			t.Error("a dry run made the base")
+		}
 	}
 }
 
