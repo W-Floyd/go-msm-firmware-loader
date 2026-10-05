@@ -31,6 +31,9 @@ func TestPartitionExtentsFixture(t *testing.T) {
 	if got, err := PartitionExtents(r, "vendor_b"); err != nil || len(got) != 0 {
 		t.Errorf("vendor_b has no extents: %v, %v", got, err)
 	}
+	if n, err := SlotCount(r); err != nil || n != 3 {
+		t.Errorf("%d slots, %v", n, err)
+	}
 }
 
 // fakePart and fakeExtent build a super image to test what the real one does
@@ -187,5 +190,20 @@ func TestPartitionsFixture(t *testing.T) {
 	}
 	if _, err := Partitions(bytes.NewReader(b), 5); err == nil {
 		t.Error("a slot that is not there was read")
+	}
+}
+
+func TestBuildRoundTrip(t *testing.T) {
+	img := Build([][]Partition{
+		{{"a_a", []Extent{{100, 10}}}},
+		{{"b_a", []Extent{{200, 5}, {300, 5}}}},
+	})
+	r := bytes.NewReader(img)
+	if n, err := SlotCount(r); err != nil || n != 2 {
+		t.Fatalf("%d, %v", n, err)
+	}
+	ps, err := Partitions(r, 1)
+	if err != nil || len(ps) != 1 || ps[0].Name != "b_a" || !slices.Equal(ps[0].Extents, []Extent{{200, 5}, {300, 5}}) {
+		t.Errorf("%v, %v", ps, err)
 	}
 }

@@ -3,6 +3,7 @@ package liblp
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"io"
 )
 
 // Options are the geometry of a synthesised super device.
@@ -106,4 +107,10 @@ func BuildWith(o Options, slots [][]Partition) []byte {
 		copy(img[off+len(h):], tables)
 	}
 	return img
+}
+
+// SlotCount is how many metadata slots the geometry says there are.
+func SlotCount(r io.ReaderAt) (int, error) {
+	g, err := readGeometry(r)
+	return int(g.slots), err
 }
