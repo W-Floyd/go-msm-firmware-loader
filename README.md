@@ -46,7 +46,9 @@ msm-firmware-loader [flags]
   --slot-suffix _a    default: androidboot.slot_suffix from --cmdline
   --extra-path DIR    blobs to link first (default: the current firmware_class.path)
   --no-dm             loop devices only
-  --exact-match       match partition names exactly, not as substrings
+  --compat            behave exactly as the shell script does, bugs included
+  --substring-match   match names as substrings (implied by --compat)
+  --exact-match       deprecated: exact is the default; forces it under --compat
   --dry-run           print what would be mounted; change nothing
   --teardown          unmount everything under --base, and exit
   -q                  do not log progress
@@ -70,7 +72,7 @@ The API (no globals, no `os.Exit`, no flags, no direct stdout; callable twice):
 
 ```go
 type Config struct { Base, SlotSuffix string; Partitions, SuperPartitions []string
-    ExactMatch bool; ExtraPath string; NoDM, NoSetPath, DryRun bool
+    Compat, SubstringMatch, ExactMatch bool; ExtraPath string; NoDM, NoSetPath, DryRun bool
     Sys, Dev, Proc string; Logf func(string, ...any); System System }
 func Run(cfg Config) (*Result, error)
 type Result struct { Base, Target string; Mounts []Mount; Links int; PathSet, DryRun bool }
@@ -125,26 +127,26 @@ empty directory in `mnt/`, which stops a second attempt at the same name, as
 in the script. Link errors ("File exists", duplicate zap shaders) are logged
 and ignored.
 
-Decisions:
+### Default and `-compat`
 
-- **Substring match is kept.** The script tests whether the partition name is
-  a substring of the whole list written as one string, so `sp` matches
-  because `dsp_a` contains it (it is then tried and, on the Moto G Play 2024,
-  fails to mount: "wrong fs type"; the loader carries on). That is what runs
-  today, so it is the default. `--exact-match` / `Config.ExactMatch` makes it
-  whole-entry matching, which would not try `sp`.
-- **Metadata slot follows the A/B slot.** The script's `make-dynpart-mappings`
-  maps only the first metadata slot ("This looks like metadata for retrofit
-  partitions. Only the first slot is mapped"; that message is the tool's and
-  is not reproduced). Here slot `_a` is metadata slot 0 (identical on `_a`)
-  and `_b` is slot 1, which is what Android itself maps.
-- **Only partitions on the list are mapped**, not all of `super`.
-- **Not reproduced on purpose:** a dangling symlink in the preselected path
-  is skipped, where the script's `break` stops linking; an empty
-  `bluetooth` mount does not create a link literally named `*` in `qca/`.
-- **Refuses to load twice** into the same `--base` (the script stacks another
-  tmpfs).
-- **Disks** are `mmcblk*` and `sd*` only, as in the script.
+The script has bugs. By default they are fixed. `-compat` (`Config.Compat`)
+keeps the script's behaviour exactly: the link tree, the `mnt/` directories
+and the logged errors are what the script makes today.
+
+| # | Behaviour | Default | `-compat` | Why |
+|---|-----------|---------|-----------|-----|
+| 1 | Slot suffix | `androidboot.slot_suffix` from the command line; a warning is logged if it is empty but A/B partitions (`*_a`, `*_b`) exist | the same, without the warning | The script asks `qbootctl` if it is installed, and `qbootctl` needs udev's `/dev/disk/by-partlabel`; before udev it fails and the suffix is silently empty, so only `persist` and `sp` mount. This never needs `qbootctl` or udev links. **Compat cannot reproduce `qbootctl` failing** (that is a property of the environment, not of the logic); it behaves as the script does when `qbootctl` is absent. |
+| 2 | tmpfs on `--base` | the directory is made, the tmpfs is mounted for real | a tmpfs only if `--base` is already a directory; otherwise logs `mounting none on ... failed: No such file or directory` and goes on, in a plain directory, as the script does on every boot | The script never creates the directory, so its isolation never exists. In compat the plain directory is removed again by `Close`. |
+| 3 | Partition-name matching | whole entries of the lists | substring of the lists written out as one string, so `sp` is tried because `dsp_a` contains it (and fails: "wrong fs type") | A substring test is a typo-class bug; `sp` is not firmware. `-substring-match` gives it without the rest of compat. `-exact-match` is deprecated: it is the default, and forces exact matching under compat. |
+| 4 | Dangling link in the preselected path | skipped, the rest is linked | the loop ends there; later blobs are dropped | The script's `break` was meant for the unmatched glob. |
+| 5 | Unguarded globs | no link | an empty `bluetooth*/image/` makes a link named `*` in `qca/` | The only unguarded glob is that one (the `venus.*` loop only runs when `venus.mdt` matches it). |
+| 5b | `bluetooth`/`fsg` partition that failed to mount | not linked | linked: the script only checks the (empty) mount directory | A failed mount is not a partition. |
+| 6 | `.mdt` to `.mbn` links, and other "File exists" | an existing `.mbn` is left alone silently; an identical existing link is no error (a different one is logged) | tries every one and logs `file exists` for each | Noise hides real errors. |
+| 7 | Dynamic-partition metadata slot | the slot of the A/B suffix (`_a` is 0, `_b` is 1, as Android maps it); a partition not listed with extents there is looked for in the other slots, and the log says so | slot 0 only, as `make-dynpart-mappings` ("Only the first slot is mapped"; that message is the tool's and is not printed). A listed partition without extents is a failed mount | Slot 0 is wrong on `_b`. Only the listed partitions are mapped, not all of `super`. |
+| 8 | Run twice | refused with `ErrLoaded` while `--base` is a mount point; fine again after `Close`/`--teardown` | allowed, and stacks another tmpfs over the first, hiding its mounts | Stacking is only ever a mistake. |
+| 9 | Devicetree `firmware-name` prefix | every distinct directory of every string of every property, sorted; the tree is linked under each; bare names (no directory) are ignored | the first property `find` returns (readdir order), its first word; a bare name gives `.` and a link `target/target` | A device has several prefixes. |
+
+Unchanged in both: the disks scanned are `mmcblk*` and `sd*`, as in the script.
 
 `msm-firmware-loader-unpack.sh` (gunzip `*.gz` blobs in the target) is not
 ported: it runs after this and is a separate service.
@@ -166,11 +168,18 @@ symlinks, normalises each base path in the link targets, and reports entries
 missing, extra or differing (busybox-safe: `find`, `readlink`, `comm`).
 
 On a Moto G Play 2024 (mainline 7.3-rc4, slot `_a`), run beside the live
-script with `--base /run/mfl-go --no-set-path --extra-path /lib/firmware/postmarketos`,
-the result was 323 entries each (the tree's links and directories, and the
-seven `mnt/` names), and the comparison reported no differences. Without
-`--extra-path` the only difference is the `ath10k` link that comes from that
-directory.
+script with `--base /run/mfl-go --no-set-path --extra-path /lib/firmware/postmarketos`
+(without `--extra-path` the live script's own target is linked, and the
+`ath10k` link from that directory is the only other difference):
+
+- `-compat`: 323 entries each, including the seven `mnt/` names and the `sp`
+  mount attempt; no entry missing, extra or differing.
+- default: 321 entries, nothing extra or differing. Missing: `mnt/sp` (3) and
+  `target/target`, the self-referential link the script makes because the
+  first `firmware-name` property on this device is a bare file name (9). The
+  other log differences: no "file exists" lines (6), and a real tmpfs (2).
+  This device's properties are all bare names, so no prefix link is made in
+  either mode.
 
 ## Test fixtures
 
