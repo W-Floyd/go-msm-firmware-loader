@@ -1,0 +1,6 @@
+/msm-firmware-loader
+/dist/
+/testdata/*.bin
+/testdata/*.img
+/internal/liblp/testdata/*.bin
+/internal/liblp/testdata/*.img
