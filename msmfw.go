@@ -3,8 +3,10 @@
 // presents them as one directory for the kernel's firmware loader
 // (firmware_class.path).
 //
-// It is a static Go port of postmarketOS's msm-firmware-loader shell script,
-// for a system that has none of that script's helpers: no udev (so no
+// It is a static Go port of postmarketOS's msm-firmware-loader shell script
+// (https://gitlab.postmarketos.org/postmarketOS/msm-firmware-loader, by Nikita
+// Travkin and contributors, MIT) for a system that has none of its
+// helpers: no udev (so no
 // /dev/disk/by-partlabel), no qbootctl, no device-mapper tools, no busybox.
 // Partitions are found by their name in sysfs, the A/B slot comes from the
 // kernel command line, and a logical partition of the "super" partition is

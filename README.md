@@ -194,6 +194,13 @@ sector numbers are made up. To look at the image with other tools:
 go generate ./internal/liblp   # writes internal/liblp/testdata/super-synthetic.img (git-ignored)
 ```
 
-## Licence
+## Credits and licence
 
-MIT, as upstream. `internal/liblp` is from the Boot Manager's firmware package.
+A port of [`msm-firmware-loader`](https://gitlab.postmarketos.org/postmarketOS/msm-firmware-loader),
+written by Nikita Travkin (© 2022, MIT) for postmarketOS and since maintained
+by its contributors. The behaviour, partition lists and link layout follow
+their script; this is not an endorsement by them or by postmarketOS.
+
+MIT: the licence is upstream's, with both copyright notices in
+[LICENSE](LICENSE). `internal/liblp` is from the Boot Manager's firmware
+package.
