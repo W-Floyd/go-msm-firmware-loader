@@ -1,3 +1,8 @@
+# Warning!
+
+This is LLM generated, part of my prototyping for [bootmanager](https://github.com/W-Floyd/bootmanager).
+That being said, I still think others might find it interesting, so here it is.
+
 # go-msm-firmware-loader
 
 A static Go port of postmarketOS's
