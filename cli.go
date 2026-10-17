@@ -20,6 +20,17 @@ const usage = `usage: msm-firmware-loader [flags]
 Mounts the firmware partitions of a Qualcomm device read-only under --base,
 links their blobs into --base/target and points firmware_class.path at it.
 
+--vendor picks the family of devices whose layout to use: qcom (the
+default, as above), or generic, which any device can use and which --rule
+implies. A vendor that knows a family's partitions and file layout is quicker
+and cleverer; generic needs no such knowledge. Generic mounts every named
+partition (or those of --partitions) read-only, finds the files the rules
+name and places them in --base/target under the names the kernel's drivers
+ask for, as links, or as copies with --copy (the partitions are then let go).
+For example:
+
+  --rule fw_bcmdhd.bin=brcm/brcmfmac4359-sdio.bin --rule 'bcm*.hcd=brcm/' --copy
+
 `
 
 // Main is the command line: args are os.Args[1:]. It returns the exit code
@@ -47,7 +58,19 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		dryRun    = fs.Bool("dry-run", false, "print what would be mounted and change nothing")
 		teardown  = fs.Bool("teardown", false, "unmount everything under --base (a test aid) and exit")
 		quiet     = fs.Bool("q", false, "do not log progress")
+		vendorArg = fs.String("vendor", "", "the device family's layout: "+strings.Join(Vendors(), ", ")+" (default qcom, or generic with --rule)")
+		copyFiles = fs.Bool("copy", false, "generic vendor: copy the files into the target and unmount the partitions, instead of linking")
+		maxDepth  = fs.Int("max-depth", 0, "generic vendor: directories below a partition's root a rule looks (default 6)")
 	)
+	var rules []Rule
+	fs.Func("rule", "generic vendor: FIND=DST, a file name (or pattern) to find in the partitions and where it goes in the target; DST ending in / takes every match under its own name; repeatable", func(s string) error {
+		r, err := ParseRule(s)
+		if err != nil {
+			return err
+		}
+		rules = append(rules, r)
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return ExitOK
@@ -74,6 +97,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		Base: *base, NoSetPath: *noSetPath, NoDM: *noDM, ExactMatch: *exact, DryRun: *dryRun,
 		Compat: *compat, SubstringMatch: *substr,
 		Partitions: splitList(*parts), SuperPartitions: splitList(*supers),
+		Vendor: *vendorArg, Rules: rules, Copy: *copyFiles, MaxDepth: *maxDepth,
 	}
 	if !*quiet {
 		cfg.Logf = logf
@@ -107,6 +131,11 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	}
 	if res.DryRun {
 		fmt.Fprintf(stdout, "slot suffix %q; tmpfs on %s; would link blobs into %s\n", cfg.SlotSuffix, res.Base, res.Target)
+		return ExitOK
+	}
+	if *vendorArg == "generic" || (*vendorArg == "" && len(rules) > 0) {
+		fmt.Fprintf(stdout, "%d link(s), %d cop(ies) in %s; %d rule(s) found nothing; %d partition(s) not mounted; firmware_class.path set: %v\n",
+			res.Links, res.Copied, res.Target, len(res.Missing), failed, res.PathSet)
 		return ExitOK
 	}
 	fmt.Fprintf(stdout, "%d link(s) in %s; %d partition(s) not mounted; firmware_class.path set: %v\n",

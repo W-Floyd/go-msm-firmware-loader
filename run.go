@@ -82,16 +82,33 @@ func Run(cfg Config) (*Result, error) {
 		cfg.ExtraPath = "" // our own target from an earlier run would link to itself
 	}
 	res := &Result{Base: cfg.Base, Target: filepath.Join(cfg.Base, "target"), DryRun: cfg.DryRun, cfg: cfg}
+	v, err := vendorFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := v.Validate(cfg); err != nil {
+		return nil, err
+	}
+	if _, ok := v.(CopyCapable); cfg.Copy && !ok {
+		return nil, fmt.Errorf("vendor %s cannot copy (Config.Copy)", v.Name())
+	}
+	// The partitions: the Config's list, else the vendor's, where nil is
+	// every named partition in the order the disks list them.
 	fw := cfg.Partitions
 	if fw == nil {
-		fw = DefaultPartitions(cfg.SlotSuffix)
+		fw = v.Partitions(cfg)
 	}
 	super := cfg.SuperPartitions
 	if super == nil {
-		super = DefaultSuperPartitions()
+		if sp, ok := v.(SuperProvider); ok {
+			super = sp.SuperPartitions(cfg)
+		}
 	}
 	exact := !(cfg.Compat || cfg.SubstringMatch) || cfg.ExactMatch
 	r := &runner{cfg: cfg, res: res, claimed: map[string]bool{}, isFW: matcher(fw, exact)}
+	if fw == nil {
+		r.isFW = func(n string) bool { return n != "" }
+	}
 
 	if !cfg.DryRun {
 		if err := r.prepareBase(); err != nil {
@@ -103,13 +120,12 @@ func Run(cfg Config) (*Result, error) {
 	}
 
 	parts := scanPartitions(cfg.Sys)
-	if cfg.SlotSuffix == "" && !cfg.Compat && cfg.Partitions == nil {
+	if pc, ok := v.(PartitionChecker); ok {
+		var names []string
 		for _, p := range parts {
-			if strings.HasSuffix(p.partName, "_a") || strings.HasSuffix(p.partName, "_b") {
-				cfg.Logf("warning: no slot suffix (androidboot.slot_suffix), but partition %q is A/B; the firmware partitions will not be found", p.partName)
-				break
-			}
+			names = append(names, p.partName)
 		}
+		pc.CheckPartitions(cfg, names, cfg.Logf)
 	}
 	r.mountDynamic(parts, matcher(super, exact))
 	for _, p := range parts {
@@ -123,8 +139,11 @@ func Run(cfg Config) (*Result, error) {
 	if cfg.DryRun {
 		return res, nil
 	}
-	if err := r.link(); err != nil {
+	if err := v.Link(&Env{r: r}); err != nil {
 		return res, err
+	}
+	if cfg.Copy {
+		res.releaseMounts() // what was copied needs nothing from the partitions
 	}
 	if !cfg.NoSetPath {
 		path := filepath.Join(cfg.Sys, "module/firmware_class/parameters/path")

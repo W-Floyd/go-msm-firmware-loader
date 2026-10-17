@@ -13,6 +13,12 @@
 // mounted through a loop device over its extent, with device-mapper only as
 // the fallback for one in several pieces.
 //
+// What is Qualcomm's is one Vendor ("qcom", the default); the rest, finding
+// and mounting the partitions read-only and pointing the kernel at the
+// result, is the same for any device. The "generic" vendor takes Rules (which
+// file, under which name) and needs no knowledge of a family; another vendor
+// is a type implementing Vendor, added with Register (vendor.go).
+//
 // The package has no process-level side effects: it reads no flags and
 // environment, writes no os.Stdout, never exits, and keeps no globals. Run
 // can be called from a long-lived process, and again after Result.Close.
@@ -75,6 +81,26 @@ type Config struct {
 	// "system".
 	Partitions      []string
 	SuperPartitions []string
+
+	// Vendor names the family of devices whose layout to use (vendor.go):
+	// "qcom" (Qualcomm, what the package was) or "generic" (Rules), or one
+	// added with Register. Empty is "generic" when there are Rules, else
+	// "qcom". SlotSuffix, Compat, SubstringMatch and ExactMatch are qcom's.
+	Vendor string
+
+	// Rules are the generic vendor's (rules.go): the files they find in the
+	// partitions are placed in the target, under the names they give. With
+	// Partitions nil every named partition of the disks is mounted
+	// (read-only), looked at in order.
+	Rules []Rule
+	// Copy copies the files into the target instead of linking them, and
+	// unmounts the partitions afterwards: for files small enough to keep in
+	// RAM, so the stock partitions are let go. For vendors that place files
+	// with Env.Place (generic does; qcom does not).
+	Copy bool
+	// MaxDepth is how many directories below a partition's root a rule looks.
+	// Default DefaultMaxDepth.
+	MaxDepth int
 
 	// Compat keeps the shell script's behaviour exactly, bugs included: the
 	// link tree, the mnt/ directories and the logged errors are what the
@@ -182,7 +208,8 @@ type Mount struct {
 	// Err is why it is not mounted. The script carries on past these.
 	Err error
 
-	dm string // the device-mapper name to remove
+	dm       string // the device-mapper name to remove
+	released bool   // already unmounted (Copy)
 }
 
 // Result is what Run did.
@@ -196,6 +223,10 @@ type Result struct {
 	// PathSet is whether firmware_class.path was written.
 	PathSet bool
 	DryRun  bool
+	// Copied is how many files generic mode copied (Config.Copy); Missing the
+	// rules that found no file.
+	Copied  int
+	Missing []Rule
 
 	cfg    Config
 	closed bool
@@ -216,7 +247,7 @@ func (r *Result) Close() error {
 	var errs []error
 	for i := len(r.Mounts) - 1; i >= 0; i-- {
 		m := r.Mounts[i]
-		if m.Err == nil {
+		if m.Err == nil && !m.released {
 			if err := r.cfg.System.Unmount(m.Dir); err != nil {
 				errs = append(errs, fmt.Errorf("unmount %s: %w", m.Dir, err))
 			}

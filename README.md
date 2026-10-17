@@ -15,6 +15,58 @@ links their blobs into one directory, and points the kernel's
 It is a library first (`package msmfw`, so the Boot Manager can run it inside
 its own binary) with a thin command, `cmd/msm-firmware-loader`, around it.
 
+## Vendors
+
+The mounting is the same for every device: find the partitions in sysfs,
+mount them read-only (the partitions of Android's `super` through a loop
+device), unfold them under `--base/mnt`, and point `firmware_class.path` at
+`--base/target`. What differs between families of devices is which partitions
+hold firmware and how the blobs in them become the names the drivers ask for.
+That is a **vendor** (`Config.Vendor`, `--vendor`), a small interface in
+`vendor.go`:
+
+| vendor | what it is |
+|--------|------------|
+| `qcom` | the default: postmarketOS's `msm-firmware-loader` linking (below), with the slot suffix, `super`/`system` dynamic partitions and the script's partition list |
+| `generic` | driven by rules (`--rule FIND=DST`, `Config.Rules`); implied when there are rules. Knows nothing of any family: every named partition is mounted and searched |
+
+A vendor that knows its family is quicker (it mounts only the partitions that
+matter, and knows where in them the files are) and cleverer (aliases,
+variants, per-device names); rules are the way that needs no such knowledge, so
+a device no vendor knows yet can be handled, or a vendor's rules tried out
+before it is written, without code. For a head unit whose Wi-Fi and Bluetooth
+files are on its system partition under the vendor's names:
+
+```sh
+msm-firmware-loader --rule fw_bcmdhd.bin=brcm/brcmfmac4359-sdio.bin \
+    --rule bcmdhd.cal=brcm/brcmfmac4359-sdio.txt \
+    --rule bcm4349.hcd=brcm/BCM4349B1.hcd --partitions system --copy
+```
+
+`FIND` is a file name or a `path.Match` pattern (matched against the base name,
+to `--max-depth` directories down, links not followed); the first partition that
+has a match wins. A `DST` ending in `/` takes every distinct match under its
+own name (`--rule 'bcm*.hcd=brcm/'`). `--copy` copies instead of linking and
+unmounts the partitions afterwards, for files small enough to keep in RAM.
+
+### Adding a vendor
+
+```go
+type Vendor interface {
+	Name() string
+	Validate(cfg Config) error      // options that do not fit
+	Partitions(cfg Config) []string // names to take firmware from; nil is all
+	Link(env *Env) error            // build the target from the mounted partitions
+}
+```
+
+Optional: `SuperProvider` (dynamic partitions to look for), `PartitionChecker`
+(warn about the disks before mounting) and `CopyCapable` (the vendor places
+files with `Env.Place`, so `Config.Copy` works). `Env` gives a vendor the
+mounted partitions (`Mounted`, `MountDir`), `Walk`, `Place`, `LinkExtra`,
+`Missing` and `Logf`. Then `msmfw.Register(v)`, and it is `--vendor NAME`.
+`vendor_generic.go` is the short example; `vendor_qcom.go` wraps `link.go`.
+
 ## Why
 
 The script needs about fifteen programs (sed, xargs, cut, head, find, ...),
@@ -57,6 +109,10 @@ msm-firmware-loader [flags]
   --slot-suffix _a    default: androidboot.slot_suffix from --cmdline
   --extra-path DIR    blobs to link first (default: the current firmware_class.path)
   --no-dm             loop devices only
+  --vendor NAME       the family's layout: qcom (default), generic; generic with --rule
+  --rule FIND=DST     generic vendor: where a file found in the partitions goes (repeatable)
+  --copy              generic vendor: copy, and unmount the partitions, instead of linking
+  --max-depth N       generic vendor: directories deep a rule looks (default 6)
   --compat            behave exactly as the shell script does, bugs included
   --substring-match   match names as substrings (implied by --compat)
   --exact-match       deprecated: exact is the default; forces it under --compat
@@ -83,10 +139,13 @@ The API (no globals, no `os.Exit`, no flags, no direct stdout; callable twice):
 
 ```go
 type Config struct { Base, SlotSuffix string; Partitions, SuperPartitions []string
+    Vendor string; Rules []Rule; Copy bool; MaxDepth int       // vendor seam; Rules/Copy/MaxDepth are generic's
     Compat, SubstringMatch, ExactMatch bool; ExtraPath string; NoDM, NoSetPath, DryRun bool
     Sys, Dev, Proc string; Logf func(string, ...any); System System }
 func Run(cfg Config) (*Result, error)
-type Result struct { Base, Target string; Mounts []Mount; Links int; PathSet, DryRun bool }
+type Result struct { Base, Target string; Mounts []Mount; Links, Copied int; Missing []Rule; PathSet, DryRun bool }
+type Rule struct { Find, Dst string }; func ParseRule(s string) (Rule, error)
+type Vendor interface { ... }; func Register(Vendor); func Vendors() []string; func LookupVendor(string) (Vendor, bool)
 func (*Result) Close() error
 type Mount struct { Name, Dir, Device, Via string; Err error }
 func Main(args []string, stdout, stderr io.Writer) int // the CLI, for embedding
