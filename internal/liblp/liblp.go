@@ -1,8 +1,7 @@
 // Package liblp reads Android's dynamic-partition ("super") metadata.
 //
-// Taken from the Boot Manager's firmware package (bootmanager, same author),
-// where it was verified on a Moto G Play 2024 against the extents
-// device-mapper made of the same metadata.
+// Verified on a Moto G Play 2024 against the extents device-mapper made of
+// the same metadata.
 package liblp
 
 import (

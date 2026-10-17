@@ -200,5 +200,4 @@ by its contributors. The behaviour, partition lists and link layout follow
 their script; this is not an endorsement by them or by postmarketOS.
 
 MIT: the licence is upstream's, with both copyright notices in
-[LICENSE](LICENSE). `internal/liblp` is from the Boot Manager's firmware
-package.
+[LICENSE](LICENSE).
