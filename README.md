@@ -35,6 +35,12 @@ device-mapper:
 
 Nothing in it is specific to one device.
 
+## Install
+
+```sh
+GOOS=linux go install github.com/W-Floyd/go-msm-firmware-loader/cmd/msm-firmware-loader@latest
+```
+
 ## Command line
 
 ```
@@ -92,26 +98,18 @@ fixtures). Only `golang.org/x/sys` is required.
 
 ### From another module (the Boot Manager)
 
-The module is not published. Use a `go.work` next to the consumer, or a
-`replace`:
-
-```
-# ~/bootmanager/go.work
-go 1.26.0
-use (
-	./bootmanager
-	../go-msm-firmware-loader
-)
+```sh
+go get github.com/W-Floyd/go-msm-firmware-loader
 ```
 
-or in `bootmanager/go.mod`:
-`replace github.com/W-Floyd/go-msm-firmware-loader => ../../go-msm-firmware-loader`
-(with a matching `require`). Then, as a subcommand:
+Then, as a subcommand:
 
 ```go
 case "firmware-loader":
 	os.Exit(msmfw.Main(os.Args[2:], os.Stdout, os.Stderr))
 ```
+
+For local changes, use a `go.work` or a `replace` as usual.
 
 ## Fidelity to the script, and where it differs
 
