@@ -54,7 +54,10 @@ placed: `FIND@SYMBOL=DST` takes the bytes of an ELF symbol (a kernel module's
 firmware array, located by its own symbol table), `FIND@OFFSET+LENGTH=DST` a
 byte range. A pattern (`bit_code_[0-9]*`) with a `DST` ending in `/` takes every
 match, named after its symbol. `?prefix=HEX` prepends a header, `?sha256=HEX`
-rejects a different build:
+rejects a different build. The last `@` in `FIND` starts the extraction; a file
+name that contains one is written `\@`. Ranges are checked against the file's
+size, and a symbol counts only if it is defined in a real, uncompressed section
+and lies inside it:
 
 ```sh
 msm-firmware-loader --partitions system \

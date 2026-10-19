@@ -65,58 +65,63 @@ type Extract struct {
 
 // ParseRule reads "FIND=DST", or "FIND@SYMBOL=DST[?prefix=HEX&sha256=HEX]" /
 // "FIND@OFFSET+LENGTH=DST[...]" to extract an ELF symbol's bytes, or a byte
-// range (decimal or 0x), instead of placing the file.
+// range (decimal or 0x), instead of placing the file. The last '@' in FIND
+// starts the extraction; a file name that contains '@' writes it as `\@`.
 func ParseRule(s string) (Rule, error) {
 	find, dst, ok := strings.Cut(s, "=")
 	find, dst = strings.TrimSpace(find), strings.TrimSpace(dst)
 	if !ok || find == "" || dst == "" {
 		return Rule{}, fmt.Errorf("rule %q: want FIND=DST", s)
 	}
-	var ex *Extract
-	if i := strings.LastIndex(find, "@"); i >= 0 {
-		spec := find[i+1:]
-		find = find[:i]
-		ex = &Extract{}
-		if c := spec[:min(1, len(spec))]; c == "_" || (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") {
-			ex.Symbol = spec
-		} else {
-			off, length, ok := strings.Cut(spec, "+")
-			var err1, err2 error
-			ex.Offset, err1 = strconv.ParseInt(off, 0, 64)
-			ex.Length, err2 = strconv.ParseInt(length, 0, 64)
-			if !ok || err1 != nil || err2 != nil || ex.Offset < 0 || ex.Length <= 0 {
-				return Rule{}, fmt.Errorf("rule %q: want FIND@SYMBOL or FIND@OFFSET+LENGTH", s)
-			}
-		}
-		dst, opts, _ := strings.Cut(dst, "?")
-		for _, kv := range strings.FieldsFunc(opts, func(r rune) bool { return r == '&' }) {
-			k, v, _ := strings.Cut(kv, "=")
-			b, err := hex.DecodeString(v)
-			switch {
-			case err != nil:
-				return Rule{}, fmt.Errorf("rule %q: %s: %w", s, k, err)
-			case k == "prefix":
-				ex.Prefix = b
-			case k == "sha256" && len(b) == sha256.Size:
-				copy(ex.SHA256[:], b)
-				ex.HasSHA = true
-			default:
-				return Rule{}, fmt.Errorf("rule %q: bad option %q", s, kv)
-			}
-		}
-		glob := ex.Symbol != "" && strings.ContainsAny(ex.Symbol, "*?[")
-		if strings.HasSuffix(dst, "/") != glob {
-			return Rule{}, fmt.Errorf("rule %q: a symbol pattern needs a directory DST (ending in /), anything else a file", s)
-		}
-		if glob && ex.HasSHA {
-			return Rule{}, fmt.Errorf("rule %q: sha256 names one range, not a pattern", s)
-		}
-		r, err := ParseRule(find + "=" + dst)
-		if err != nil {
-			return Rule{}, err
-		}
-		r.Extract = ex
+	name, spec, extract := splitExtract(find)
+	var opts string
+	if extract {
+		dst, opts, _ = strings.Cut(dst, "?")
+	}
+	r, err := plainRule(s, name, dst)
+	if err != nil {
+		return Rule{}, err
+	}
+	if !extract {
 		return r, nil
+	}
+	ex, err := parseExtract(s, spec, opts)
+	if err != nil {
+		return Rule{}, err
+	}
+	glob := ex.Symbol != "" && strings.ContainsAny(ex.Symbol, "*?[")
+	if r.isDir() != glob {
+		return Rule{}, fmt.Errorf("rule %q: a symbol pattern needs a directory DST (ending in /), anything else a file", s)
+	}
+	if glob && ex.HasSHA {
+		return Rule{}, fmt.Errorf("rule %q: sha256 names one range, not a pattern", s)
+	}
+	r.Extract = ex
+	return r, nil
+}
+
+// splitExtract cuts FIND at its last unescaped '@'; \@ is a literal '@'.
+func splitExtract(find string) (name, spec string, extract bool) {
+	cut := -1
+	for i := 0; i < len(find); i++ {
+		if find[i] == '\\' && i+1 < len(find) {
+			i++
+			continue
+		}
+		if find[i] == '@' {
+			cut = i
+		}
+	}
+	if cut < 0 {
+		return strings.ReplaceAll(find, `\@`, "@"), "", false
+	}
+	return strings.ReplaceAll(find[:cut], `\@`, "@"), find[cut+1:], true
+}
+
+// plainRule checks and cleans the file name (or pattern) and destination.
+func plainRule(s, find, dst string) (Rule, error) {
+	if find == "" || dst == "" {
+		return Rule{}, fmt.Errorf("rule %q: want FIND=DST", s)
 	}
 	if _, err := path.Match(find, ""); err != nil {
 		return Rule{}, fmt.Errorf("rule %q: %w", s, err)
@@ -135,14 +140,71 @@ func ParseRule(s string) (Rule, error) {
 	return Rule{Find: find, Dst: clean}, nil
 }
 
+// symbolChars is what an ELF symbol name or pattern may contain here; '+' is
+// not in it, so FIND@OFFSET+LENGTH never reads as a symbol.
+func symbolChars(spec string) bool {
+	for _, c := range spec {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("_.$*?[]-^!", c):
+		default:
+			return false
+		}
+	}
+	return spec != ""
+}
+
+// parseExtract reads what follows the '@' (a symbol, or OFFSET+LENGTH) and the
+// options after the '?'.
+func parseExtract(s, spec, opts string) (*Extract, error) {
+	ex := &Extract{}
+	if spec != "" && (spec[0] < '0' || spec[0] > '9') {
+		if !symbolChars(spec) {
+			return nil, fmt.Errorf("rule %q: want FIND@SYMBOL or FIND@OFFSET+LENGTH", s)
+		}
+		if _, err := path.Match(spec, ""); err != nil {
+			return nil, fmt.Errorf("rule %q: symbol pattern: %w", s, err)
+		}
+		ex.Symbol = spec
+	} else {
+		off, length, ok := strings.Cut(spec, "+")
+		var err1, err2 error
+		ex.Offset, err1 = strconv.ParseInt(off, 0, 64)
+		ex.Length, err2 = strconv.ParseInt(length, 0, 64)
+		if !ok || err1 != nil || err2 != nil || ex.Offset < 0 || ex.Length <= 0 {
+			return nil, fmt.Errorf("rule %q: want FIND@SYMBOL or FIND@OFFSET+LENGTH", s)
+		}
+	}
+	for _, kv := range strings.FieldsFunc(opts, func(r rune) bool { return r == '&' }) {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || v == "" {
+			return nil, fmt.Errorf("rule %q: option %q wants NAME=HEX", s, kv)
+		}
+		b, err := hex.DecodeString(v)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("rule %q: %s: %w", s, k, err)
+		case k == "prefix":
+			ex.Prefix = b
+		case k == "sha256" && len(b) == sha256.Size:
+			copy(ex.SHA256[:], b)
+			ex.HasSHA = true
+		default:
+			return nil, fmt.Errorf("rule %q: bad option %q", s, kv)
+		}
+	}
+	return ex, nil
+}
+
 func (r Rule) String() string {
+	find := strings.ReplaceAll(r.Find, "@", `\@`)
 	e := r.Extract
 	if e == nil {
-		return r.Find + "=" + r.Dst
+		return find + "=" + r.Dst
 	}
-	out := fmt.Sprintf("%s@%s=%s", r.Find, e.Symbol, r.Dst)
+	out := fmt.Sprintf("%s@%s=%s", find, e.Symbol, r.Dst)
 	if e.Symbol == "" {
-		out = fmt.Sprintf("%s@%d+%d=%s", r.Find, e.Offset, e.Length, r.Dst)
+		out = fmt.Sprintf("%s@%d+%d=%s", find, e.Offset, e.Length, r.Dst)
 	}
 	var opts []string
 	if len(e.Prefix) > 0 {

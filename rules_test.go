@@ -364,3 +364,21 @@ func TestELFSymbolRange(t *testing.T) {
 		t.Error("missing symbol found")
 	}
 }
+
+func TestGenericExtractAlreadyThere(t *testing.T) {
+	cfg, fake := genericWorld(t)
+	fake.fixtures["mmcblk0p1"]["lib/modules/vpu_lib.ko"] = "0123456789ABCDEF"
+	cfg.Copy = true
+	cfg.Rules = mustRules(t, "vpu_lib.ko@6+6=fw/a.bin", "vpu_lib.ko@6+6=fw/a.bin")
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The second rule found its file; its destination was just already there.
+	if len(res.Missing) != 0 || res.Copied != 1 {
+		t.Errorf("Missing = %v, Copied = %d", res.Missing, res.Copied)
+	}
+	if got := read(t, filepath.Join(res.Target, "fw/a.bin")); got != "6789AB" {
+		t.Errorf("a.bin = %q", got)
+	}
+}
