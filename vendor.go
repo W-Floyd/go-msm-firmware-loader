@@ -174,6 +174,32 @@ func (e *Env) LinkExtra() {
 // Missing records a want that found nothing, in Result.Missing.
 func (e *Env) Missing(r Rule) { e.r.res.Missing = append(e.r.res.Missing, r) }
 
+// PlaceBytes writes data as dst in the target: a file of its own, whatever
+// Config.Copy says, since it exists in no partition to link to.
+func (e *Env) PlaceBytes(data []byte, dst, from string) bool {
+	return e.r.placeBytes(data, dst, from)
+}
+
+func (r *runner) placeBytes(data []byte, dst, from string) bool {
+	full := filepath.Join(r.res.Target, filepath.FromSlash(dst))
+	if _, err := os.Lstat(full); err == nil {
+		r.cfg.Logf("%s: already there, kept", dst)
+		return false
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		r.cfg.Logf("%s: %v", dst, err)
+		return false
+	}
+	if err := os.WriteFile(full, data, 0o644); err != nil {
+		r.cfg.Logf("write %s: %v", dst, err)
+		os.Remove(full)
+		return false
+	}
+	r.res.Copied++
+	r.cfg.Logf("%s <- %s (extracted, %d bytes)", dst, from, len(data))
+	return true
+}
+
 // place is Env.Place.
 func (r *runner) place(src, dst string) bool {
 	full := filepath.Join(r.res.Target, filepath.FromSlash(dst))

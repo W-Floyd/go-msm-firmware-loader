@@ -49,6 +49,18 @@ has a match wins. A `DST` ending in `/` takes every distinct match under its
 own name (`--rule 'bcm*.hcd=brcm/'`). `--copy` copies instead of linking and
 unmounts the partitions afterwards, for files small enough to keep in RAM.
 
+A blob that exists only inside a vendor binary is carved out instead of
+placed: `FIND@SYMBOL=DST` takes the bytes of an ELF symbol (a kernel module's
+firmware array, located by its own symbol table), `FIND@OFFSET+LENGTH=DST` a
+byte range. A pattern (`bit_code_[0-9]*`) with a `DST` ending in `/` takes every
+match, named after its symbol. `?prefix=HEX` prepends a header, `?sha256=HEX`
+rejects a different build:
+
+```sh
+msm-firmware-loader --partitions system \
+    --rule 'vpu_lib.ko@bit_code_[0-9]*=coda/?prefix=4d58...'
+```
+
 ### Adding a vendor
 
 ```go

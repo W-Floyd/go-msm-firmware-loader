@@ -1,6 +1,8 @@
 package msmfw
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,11 +269,11 @@ func TestGenericDryRunAndCompat(t *testing.T) {
 
 func TestParseRule(t *testing.T) {
 	for in, want := range map[string]Rule{
-		"fw.bin=brcm/fw.bin":   {"fw.bin", "brcm/fw.bin"},
-		" a = b//c/ ":          {"a", "b/c/"},
-		"bcm*.hcd=brcm/":       {"bcm*.hcd", "brcm/"},
-		"x=./y/../z":           {"x", "z"},
-		"89359.clm_blob=a/b.c": {"89359.clm_blob", "a/b.c"},
+		"fw.bin=brcm/fw.bin":   {Find: "fw.bin", Dst: "brcm/fw.bin"},
+		" a = b//c/ ":          {Find: "a", Dst: "b/c/"},
+		"bcm*.hcd=brcm/":       {Find: "bcm*.hcd", Dst: "brcm/"},
+		"x=./y/../z":           {Find: "x", Dst: "z"},
+		"89359.clm_blob=a/b.c": {Find: "89359.clm_blob", Dst: "a/b.c"},
 	} {
 		got, err := ParseRule(in)
 		if err != nil || got != want {
@@ -285,5 +287,80 @@ func TestParseRule(t *testing.T) {
 	}
 	if r := (Rule{Find: "a=b"}); r.String() != "a=b=" {
 		t.Errorf("String = %q", r.String())
+	}
+}
+
+func TestParseRuleExtract(t *testing.T) {
+	r, err := ParseRule("vpu_lib.ko@0x53078+233472=v4l-coda960.bin?prefix=4d58&sha256=" + strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := r.Extract
+	if r.Find != "vpu_lib.ko" || e.Offset != 0x53078 || e.Length != 233472 || string(e.Prefix) != "MX" || !e.HasSHA {
+		t.Errorf("%+v %+v", r, e)
+	}
+	if r2, err := ParseRule(r.String()); err != nil || r2.String() != r.String() {
+		t.Errorf("round trip: %v %q", err, r2.String())
+	}
+	if r, err := ParseRule("vpu_lib.ko@bit_code_319=fw.bin?prefix=4d58"); err != nil || r.Extract.Symbol != "bit_code_319" || r.String() != "vpu_lib.ko@bit_code_319=fw.bin?prefix=4d58" {
+		t.Errorf("symbol rule: %+v %v", r, err)
+	}
+	if r, err := ParseRule("vpu_lib.ko@bit_code_*=coda/"); err != nil || !r.isDir() {
+		t.Errorf("glob rule: %+v %v", r, err)
+	}
+	for _, bad := range []string{"a@bit_*=x", "a@sym=dir/", "a@bit_*=d/?sha256=" + strings.Repeat("00", 32), "a@1=x", "a@1+0=x", "a@-1+2=x", "a@1+2=dir/", "a@1+2=x?sha256=00", "a@1+2=x?foo=00"} {
+		if _, err := ParseRule(bad); err == nil {
+			t.Errorf("%q parsed", bad)
+		}
+	}
+}
+
+func TestGenericExtract(t *testing.T) {
+	cfg, fake := genericWorld(t)
+	fake.fixtures["mmcblk0p1"]["lib/modules/vpu_lib.ko"] = "0123456789ABCDEF"
+	sum := sha256.Sum256([]byte("6789AB"))
+	cfg.Rules = mustRules(t,
+		"vpu_lib.ko@6+6=fw/ok.bin?prefix=4d58&sha256="+hex.EncodeToString(sum[:]),
+		"vpu_lib.ko@6+6=fw/wrongsum.bin?sha256="+strings.Repeat("00", 32),
+		"vpu_lib.ko@12+9=fw/short.bin",
+	)
+	res, err := Run(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(res.Target, "fw/ok.bin")); got != "MX6789AB" {
+		t.Errorf("ok.bin = %q", got)
+	}
+	for _, n := range []string{"fw/wrongsum.bin", "fw/short.bin"} {
+		if _, err := os.Lstat(filepath.Join(res.Target, n)); err == nil {
+			t.Errorf("%s was written", n)
+		}
+	}
+	if len(res.Missing) != 2 || res.Copied != 1 {
+		t.Errorf("Missing = %v, Copied = %d", res.Missing, res.Copied)
+	}
+}
+
+// With a real object to hand (not in the repo): VPU_LIB_KO=path go test -run ELF
+func TestELFSymbolRange(t *testing.T) {
+	p := os.Getenv("VPU_LIB_KO")
+	if p == "" {
+		t.Skip("VPU_LIB_KO not set")
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	one, err := elfSymbolRanges(f, "bit_code_319")
+	if err != nil || len(one) != 1 || one[0].off != 340088 || one[0].size != 233472 {
+		t.Errorf("bit_code_319 = %+v, %v", one, err)
+	}
+	all, err := elfSymbolRanges(f, "bit_code_[0-9]*")
+	if err != nil || len(all) != 3 || all[0].name != "bit_code_111" || all[2].name != "bit_code_319" {
+		t.Errorf("bit_code_* = %+v, %v", all, err)
+	}
+	if _, err := elfSymbolRanges(f, "nope"); err == nil {
+		t.Error("missing symbol found")
 	}
 }

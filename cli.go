@@ -63,7 +63,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		maxDepth  = fs.Int("max-depth", 0, "generic vendor: directories below a partition's root a rule looks (default 6)")
 	)
 	var rules []Rule
-	fs.Func("rule", "generic vendor: FIND=DST, a file name (or pattern) to find in the partitions and where it goes in the target; DST ending in / takes every match under its own name; repeatable", func(s string) error {
+	fs.Func("rule", "generic vendor: FIND=DST, a file name (or pattern) to find in the partitions and where it goes in the target; DST ending in / takes every match under its own name; FIND@SYMBOL=DST[?prefix=HEX&sha256=HEX] extracts an ELF symbol's bytes (FIND@OFFSET+LENGTH a byte range) instead; repeatable", func(s string) error {
 		r, err := ParseRule(s)
 		if err != nil {
 			return err
